@@ -1,0 +1,45 @@
+{
+  "name": "pl_ingest_orders",
+  "properties": {
+    "parameters": {
+      "load_date": { "type": "string", "defaultValue": "@formatDateTime(utcnow(),'yyyy-MM-dd')" },
+      "source_table": { "type": "string", "defaultValue": "sales.orders" }
+    },
+    "activities": [
+      {
+        "name": "copy_orders_to_landing",
+        "type": "Copy",
+        "inputs": [{ "referenceName": "ds_sql_source", "type": "DatasetReference",
+                     "parameters": { "table": "@pipeline().parameters.source_table" } }],
+        "outputs": [{ "referenceName": "ds_adls_landing_parquet", "type": "DatasetReference",
+                      "parameters": { "folder": "@concat('orders/load_date=', pipeline().parameters.load_date)" } }],
+        "typeProperties": {
+          "source": { "type": "SqlServerSource",
+                      "sqlReaderQuery": "@concat('SELECT * FROM ', pipeline().parameters.source_table, ' WHERE CAST(modified_at AS date) = ''', pipeline().parameters.load_date, '''')" },
+          "sink": { "type": "ParquetSink" }
+        },
+        "policy": { "retry": 2, "retryIntervalInSeconds": 120, "timeout": "0.02:00:00" }
+      },
+      {
+        "name": "run_databricks_orders_job",
+        "type": "DatabricksJob",
+        "dependsOn": [{ "activity": "copy_orders_to_landing", "dependencyConditions": ["Succeeded"] }],
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "jobId": "@pipeline().globalParameters.orders_job_id",
+          "jobParameters": { "load_date": "@pipeline().parameters.load_date" }
+        }
+      },
+      {
+        "name": "alert_on_failure",
+        "type": "WebActivity",
+        "dependsOn": [{ "activity": "run_databricks_orders_job", "dependencyConditions": ["Failed"] }],
+        "typeProperties": {
+          "method": "POST",
+          "url": "@pipeline().globalParameters.alert_webhook",
+          "body": { "pipeline": "@pipeline().Pipeline", "runId": "@pipeline().RunId", "error": "@activity('run_databricks_orders_job').error.message" }
+        }
+      }
+    ]
+  }
+}
